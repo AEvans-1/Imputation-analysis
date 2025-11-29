@@ -1,0 +1,460 @@
+---
+title: "Evaluating imputation methods in small clinical datasets"
+author: "Arthur Evans"
+date: "2025-01-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(mice)
+library(missForest)
+library(VIM)
+library(miceadds)
+library(caret)
+library(naniar)
+library(doParallel)
+library(foreach)
+library(pscl)
+```
+
+#1 Imputing missing varibales
+##1.1 Summarising the missingness in the current dataset
+###1.1.1 Describing the type of missingness and connectivity of missing values. Key to the (in "complet_pair_numbers" for data (A,B) ".rr" refers to the number of completely observed pairs, ".rm" and ".mr" referes to A or B missing respectively, whilst ".mm" refers to a completely missing pair of A and B) this dataset has connected missingness 
+```{r}
+data$missing_count <- rowSums(is.na(data))
+colSums(is.na(data))
+sum(data$missing_count)
+md.pattern(data, plot = TRUE)
+gg_miss_upset(data)
+na_data_pre_imputation <- data[, sapply(data, function(col) any(is.na(col)))]
+complete_pair_numbers <- md.pairs(na_data_pre_imputation)
+complete_pair_numbers_df <- as.data.frame(complete_pair_numbers)
+complete_pair_numbers$mr / (complete_pair_numbers$mr + complete_pair_numbers$mm)
+proportion_of_useable_cases <- complete_pair_numbers$mr / (complete_pair_numbers$mr + complete_pair_numbers$mm)
+```
+##1.2 Imputation prep
+###1.2.1 Subsetting the current dataset to create a datast without NA's and then a further two; one with numeric variables and one with factor variables 
+
+numeric dataset that has been centred (column mean subtracted) and scaled (dividing by the standard deviation), a scaled numeric dataset containing no NA data for augmentation, and a categorical dataset wiht no NA values for imputation methods. Hair loss was removed as it was a single-level factor plus all platinum chemo patients lose all their hair  
+```{r}
+summary(data)
+numeric_data <- data %>%
+  select_if(is.numeric)
+numeric_data <- as.data.frame(numeric_data)
+
+data_no_na <- data[data$missing_count == 0, ]
+data_no_na <- data_no_na %>% select(-missing_count)
+
+clean_numeric_data <- data_no_na %>%
+  select_if(is.numeric)
+clean_numeric_data <- as.data.frame(clean_numeric_data)
+
+factor_data_no_na <- data_no_na %>%
+  select_if(is.factor)
+factor_data_no_na$Hair_loss <- NULL
+```
+
+###1.2.5 Standardising the numeric dataset and the augmented dataset, by first centering (column mean subtracted) and scaling (dividing by the standard deviation)
+````{r}
+clean_numeric_data_scaled <- scale(clean_numeric_data, center = TRUE, scale = TRUE)
+clean_numeric_data_scaled <- as.data.frame(clean_numeric_data_scaled)
+````
+
+
+###1.2.2 Adding guassian noise to create augmented training datasets with no NAs for imputation models to then be tested against 
+```{r}
+set_seed = 00
+noise_level <- 0.5
+num_new_variables <- 100
+
+noise_up_mirror_data <- clean_numeric_data %>%
+  slice_sample(n = num_new_variables, replace = TRUE) %>%
+  mutate(across(everything(),
+                ~ pmax(0,
+                . + rnorm(n = num_new_variables, mean = 0, sd = noise_level * sd(., na.rm = TRUE)))))
+
+augmented_100_numeric_dataset <- noise_up_mirror_data
+augmented_100_numeric_data_scaled <- scale(augmented_numeric_dataset, center = TRUE, scale = TRUE)
+augmented_100_numeric_data_caled <- as.data.frame(augmented_numeric_data_scaled)
+
+noise_level <- 0.5
+num_new_variables <- 50
+noise_up_mirror_data <- clean_numeric_data %>%
+  slice_sample(n = num_new_variables, replace = TRUE) %>%
+  mutate(across(everything(),
+                ~ pmax(0,
+                . + rnorm(n = num_new_variables, mean = 0, sd = noise_level * sd(., na.rm = TRUE)))))
+
+augmented_50_numeric_dataset <- noise_up_mirror_data
+augmented_50_numeric_data_scaled <- scale(augmented_numeric_dataset, center = TRUE, scale = TRUE)
+augmented_50_numeric_data_caled <- as.data.frame(augmented_numeric_data_scaled)
+
+noise_level <- 0.5
+num_new_variables <- 200
+noise_up_mirror_data <- clean_numeric_data %>%
+  slice_sample(n = num_new_variables, replace = TRUE) %>%
+  mutate(across(everything(),
+                ~ pmax(0,
+                . + rnorm(n = num_new_variables, mean = 0, sd = noise_level * sd(., na.rm = TRUE)))))
+
+augmented_200_numeric_dataset <- noise_up_mirror_data
+augmented_200_numeric_data_scaled <- scale(augmented_numeric_dataset, center = TRUE, scale = TRUE)
+augmented_200_numeric_data_caled <- as.data.frame(augmented_numeric_data_scaled)
+```
+
+####1.2.2.1 Describing noise up data compared to original 
+```{r}
+augmented_numeric_dataset %>%
+  ggplot(mapping = aes(x=Patient.no..., y=HCG.at.diagnosis..IU.L.)) + geom_point() + geom_jitter(width = 0.01, height = 0.01) + geom_smooth()
+
+clean_numeric_data %>%
+  ggplot(mapping = aes(x=Patient.no..., y=HCG.at.diagnosis..IU.L.)) + geom_point() + geom_smooth()
+
+numeric_data_KNN %>%
+  ggplot(mapping = aes(x=Patient.no..., y=HCG.at.diagnosis..IU.L.)) + geom_point() + geom_smooth()
+
+augmented_numeric_dataset %>%
+  ggplot(mapping = aes(x=Patient.no..., y=Antecedent.pregnancy.interval..months.)) + geom_point() + geom_jitter(width = 0.01, height = 0.01) + geom_smooth()
+
+clean_numeric_data %>%
+  ggplot(mapping = aes(x=Patient.no..., y=Antecedent.pregnancy.interval..months.)) + geom_point() + geom_smooth()
+
+```
+
+###1.2.3 Adding missing at random data to both the augmented dataset and the orignal dataset with NA's removed to create two complete training datasets where the true values are known to test imputation models against ~2.5% missingness was chosen to simulate the actual platinum dataset 
+```{r}
+missing_rate <-0.025
+total_elements_clean_numeric <- prod(dim(clean_numeric_data_scaled))
+num_missing_clean_numeric <- round(missing_rate * total_elements_clean_numeric)
+missing_positions_numeric_with_na <- sample(1:total_elements_clean_numeric, num_missing_clean_numeric)
+clean_numeric_data_scaled_matrix <- as.matrix(clean_numeric_data_scaled)
+clean_numeric_data_scaled_matrix[missing_positions_numeric_with_na] <- NA
+numeric_data_with_na_scaled <- as.data.frame(clean_numeric_data_scaled_matrix)
+numeric_data_with_na_sclaed_na_positions <- is.na(numeric_data_with_na_scaled)
+gg_miss_upset(numeric_data_with_na)
+
+total_elements_augmented <- prod(dim(augmented_numeric_dataset))
+num_missing_augmented <- round(missing_rate * total_elements_augmented)
+missing_positions_augmented <- sample(1:total_elements_augmented, num_missing_augmented)
+augmented_numeric_dataset_matrix <- as.matrix(augmented_numeric_dataset)
+augmented_numeric_dataset_matrix[missing_positions_augmented] <- NA
+augmented_numeric_data_to_impute <- as.data.frame(augmented_numeric_dataset_matrix)
+augmented_data_na_positions <- is.na(augmented_numeric_data_to_impute)
+gg_miss_upset(augmented_numeric_data_to_impute)
+
+total_elements_factor <- prod(dim(factor_data_no_na))
+num_missing_factor <- round(missing_rate * total_elements_factor)
+missing_positions_factor <- sample(1:total_elements_factor, num_missing_factor)
+factor_data_matrix <- as.matrix(factor_data_no_na)
+factor_data_matrix[missing_positions_factor] <- NA
+factor_data_to_impute <- as.data.frame(factor_data_matrix)
+for (i in seq_along(factor_data_to_impute)) {
+  if (is.factor(factor_data_no_na[[i]])) {
+    factor_data_to_impute[[i]] <- factor(factor_data_to_impute[[i]], levels = levels(factor_data_no_na[[i]])) }}
+factor_data_to_impute_na_positions <- is.na(factor_data_to_impute)
+```
+###1.2.4 Summarising missingness patterns in the datasets with NA's added 
+```{r}
+colSums(is.na(numeric_data_with_na))
+md.pattern(numeric_data_with_na, plot = TRUE)
+complete_pair_numbers_numeric_data_with_na <- md.pairs(numeric_data_with_na)
+complete_pair_numbers_numeric_data_with_na_df <- as.data.frame(complete_pair_numbers_numeric_data_with_na)
+complete_pair_numbers_numeric_data_with_na$mr / (complete_pair_numbers_numeric_data_with_na$mr + complete_pair_numbers_numeric_data_with_na$mm)
+proportion_of_useable_cases <- complete_pair_numbers_numeric_data_with_na$mr / (complete_pair_numbers_numeric_data_with_na$mr + complete_pair_numbers_numeric_data_with_na$mm)
+
+colSums(is.na(augmented_numeric_data_to_impute))
+md.pattern(augmented_numeric_data_to_impute, plot = TRUE)
+complete_pair_numbers_augmented_numeric_data_to_impute <- md.pairs(augmented_numeric_data_to_impute)
+complete_pair_numbers_augmented_numeric_data_to_impute_df <- as.data.frame(complete_pair_numbers_augmented_numeric_data_to_impute)
+complete_pair_numbers_augmented_numeric_data_to_impute$mr / (complete_pair_numbers_augmented_numeric_data_to_impute$mr + complete_pair_numbers_augmented_numeric_data_to_impute$mm)
+proportion_of_useable_cases <- complete_pair_numbers_augmented_numeric_data_to_impute$mr / (complete_pair_numbers_augmented_numeric_data_to_impute$mr + complete_pair_numbers_augmented_numeric_data_to_impute$mm)
+
+colSums(is.na(factor_data_to_impute))
+md.pattern(factor_data_to_impute, plot = TRUE)
+complete_pair_numbers_factor_data_to_impute <- md.pairs(factor_data_to_impute)
+complete_pair_numbers_factor_data_to_impute_df <- as.data.frame(complete_pair_numbers_factor_data_to_impute)
+complete_pair_numbers_factor_data_to_impute$mr / (complete_pair_numbers_factor_data_to_impute$mr + complete_pair_numbers_factor_data_to_impute$mm)
+proportion_of_useable_cases <- complete_pair_numbers_factor_data_to_impute$mr / (complete_pair_numbers_factor_data_to_impute$mr + complete_pair_numbers_factor_data_to_impute$mm)
+```
+##4 Bootstrapping all imputation methods to generate confidence intervals for each imputation metric evaluation
+
+###4.1.0 Creating and registering parallel backend for performance 
+```{r}
+n_cores <- parallel::detectCores() - 1 
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+```
+###4.1.1 The actual function for numeric_no_na data
+```{r}
+set_seed = 00
+no_na_bootstrap_large_dataframe <- foreach (i = 1:1000, .combine = rbind,
+                                              .packages = c ("dplyr", "VIM", "missForest", "mice")) %dopar% {
+  #adding missing at random data to the dataframe
+  missing_rate <- 0.01
+total_elements_clean_numeric <- prod(dim(clean_numeric_data))
+num_missing_clean_numeric <- round(missing_rate * total_elements_clean_numeric)
+missing_positions_numeric_with_na <- sample(1:total_elements_clean_numeric, num_missing_clean_numeric, replace = FALSE)
+clean_numeric_data_matrix <- as.matrix(clean_numeric_data)
+clean_numeric_data_matrix[missing_positions_numeric_with_na] <- NA
+numeric_data_with_na <- as.data.frame(clean_numeric_data_matrix)
+clean_numeric_data_matrix <- as.matrix(clean_numeric_data)
+numeric_data_with_na_na_positions <- is.na(numeric_data_with_na)
+
+#sometimes adding this missingness at ranodm to the dataframe can have negative impacts on the imputation process and cause the code to break. This step scans for these and removes these problems from each run; whilst this does mean that in certain runs of this certain variables are excluded however overall in order to be able to run the following code segments sucessfully this step is needed.
+all_missing_variables <- apply(numeric_data_with_na, 2, function(col) all(is.na(col)))
+numeric_data_with_na_filtered <- numeric_data_with_na[!all_missing_variables]
+clean_numeric_data_scaled_filtered <- clean_numeric_data_scaled[!all_missing_variables]
+
+#creating new NA map post filtering
+numeric_data_with_na_filtered_na_positions <- is.na(numeric_data_with_na_filtered)
+
+
+#scaling the dataframe pre-imputation, to undo this step for comparison later you must times your value by the standard deviation of the variable you want to compare and add the mean
+numeric_data_with_na_scaled <- scale(numeric_data_with_na_filtered, center = TRUE, scale = TRUE)
+numeric_data_with_na_scaled <- as.data.frame(numeric_data_with_na_scaled)
+
+#Imputing using KNN
+numeric_data_KNN <- kNN(numeric_data_with_na_scaled, k = 5)
+numeric_data_KNN <- numeric_data_KNN %>%
+  select_if(is.numeric)
+
+#Imputing using random forest 
+numeric_data_randomforest <- missForest(numeric_data_with_na_scaled,
+                                        maxiter = 10, ntree = 100,
+                                        verbose = FALSE, 
+                                        variablewise = FALSE)
+numeric_data_randomforest$OOBerror
+numeric_data_randomforest <- as.data.frame(numeric_data_randomforest [["ximp"]], row.names = NULL)
+
+#Imputing using the mean 
+numeric_data_mean_imputed <- numeric_data_with_na_scaled %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), mean (., na.rm = TRUE),.)))
+
+#Imputing using the median
+numeric_data_median_imputed <- numeric_data_with_na_scaled %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), median (., na.rm = TRUE),.)))
+
+#Imputing using multiple chained equations with predictive mean matching 
+numeric_data_mice_predictive_mean_matching <- mice(numeric_data_with_na_scaled, method = "pmm", m=5, maxit = 10, seed = 1)
+numeric_data_mice_predictive_mean_matching <- complete(numeric_data_mice_predictive_mean_matching, action = 1)
+
+#Imputing using multiple chained equations and random forest 
+numeric_data_mice_randomforest <- mice(numeric_data_with_na_scaled, method = "rf", m=5, maxit = 10, seed = 1)
+numeric_data_mice_randomforest <- complete(numeric_data_mice_randomforest, action = 1)
+
+#Imputing using multiple chained equations and logistic regression 
+numeric_data_mice_logreg <- mice(numeric_data_with_na_scaled, method = "norm", m=5, maxit = 10, seed = 1)
+numeric_data_mice_logreg <- complete(numeric_data_mice_logreg, action = 1)
+
+
+#Moving on to generating MSE, RMSE, MAE,and bias metrics by first specifying a list of all the imputed datasets that have just been created 
+no_na_imputed_datasets <- list(
+  KNN_with_na = numeric_data_KNN, 
+  Mean_with_na = numeric_data_mean_imputed, 
+  Median_with_na = numeric_data_median_imputed,
+  RandomForest_with_na = numeric_data_randomforest,
+  Mice_ranadomforest_with_na = numeric_data_mice_randomforest,
+  Mice_predictive_mean_matching_with_na = numeric_data_mice_predictive_mean_matching,
+  Mice_logistic_regression_with_na = numeric_data_mice_logreg
+  )
+
+no_na_bootstrap_results <- data_frame()
+
+for (method_name in names(no_na_imputed_datasets)) {
+  imputed_data <- no_na_imputed_datasets[[method_name]]
+  
+  true_vals <- clean_numeric_data_scaled_filtered[numeric_data_with_na_na_positions]
+  imp_vals <- imputed_data[numeric_data_with_na_na_positions]
+  mse  <- mean((true_vals - imp_vals)^2)
+  rmse <- sqrt(mse)
+  mae <- mean(abs(imp_vals - true_vals), na.rm = TRUE)
+  rb <- mean(imp_vals - true_vals)
+  pb <- mean((as.matrix(imp_vals) - (as.matrix(true_vals)))[true_vals != 0] / true_vals[true_vals != 0])
+  mb <- median(imp_vals - true_vals, na.rm = TRUE)
+  
+  no_na_bootstrap_results <- rbind(no_na_bootstrap_results, data.frame(
+                                     iteration = i,
+                                     method = method_name, 
+                                     MSE = mse, 
+                                     RMSE = rmse,
+                                     MAE = mae,
+                                     Raw_bias = rb,
+                                     Percentage_bias = pb, 
+                                     Median_bias = mb)
+  )
+}
+no_na_bootstrap_results
+                                              }
+stopCluster(cl)
+```
+###4.1.1 Collapsing the result of the numeric_no_na bootstrap into a single results table
+```{r}
+no_na_bootstrap_results <- no_na_bootstrap_large_dataframe %>%
+  group_by(method) %>%
+  summarise(
+    mean_MSE = mean(MSE),
+    median_MSE = median(MSE),
+    
+    mean_RMSE = mean(RMSE),
+    median_RMSE = median(RMSE),
+  
+    mean_MAE = mean(MAE),
+    median_MAE = median(MAE),
+    
+    mean_Raw_bias = mean(Raw_bias),
+    median_Raw_bias = median(Raw_bias),
+
+    mean_Percentage_bias = mean(Percentage_bias),
+    median_Percentage_bias = median(Percentage_bias),
+    
+    mean_Median_bias = mean(Median_bias),
+    median_Median_bias = median(Median_bias),
+)
+```
+###4.2.0 Creating and registering parallel backend for performance 
+```{r}
+n_cores <- parallel::detectCores() - 1 
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+```
+###4.2.1 The actual function for the augmented_50 numeric data
+```{r}
+set_seed = 00
+augmented_50_bootstrap_large_dataframe <- foreach (i = 1:1000, .combine = rbind,
+                                              .packages = c ("dplyr", "VIM", "missForest", "mice")) %dopar% {
+  #Adding missing data to the dataframe 
+  missing_rate <-0.025
+total_elements_augmented_50 <- prod(dim(augmented_50_numeric_dataset))
+num_missing_augmented_50 <- round(missing_rate * total_elements_augmented_50)
+missing_positions_augmented_50 <- sample(1:total_elements_augmented_50, num_missing_augmented_50)
+augmented_50_numeric_dataset_matrix <- as.matrix(augmented_50_numeric_dataset)
+augmented_50_numeric_dataset_matrix[missing_positions_augmented_50] <- NA
+augmented_50_numeric_data_to_impute <- as.data.frame(augmented_50_numeric_dataset_matrix)
+augmented_50_numeric_dataset_matrix <- as.matrix(augmented_50_numeric_dataset)
+augmented_50_data_na_positions <- is.na(augmented_50_numeric_data_to_impute)
+
+
+#Sometimes adding this missingness at random to the dataframe can have negating impacts on the imputation process and cause the code to break. This step scans for these and removes these problems from each run; whilst this does mean that in certain runs of this certain variables are excluded however overall in order to be able to run the following code segments successfully this step is needed. 
+all_missing_variables <- apply(augmented_50_numeric_data_to_impute, 2, function(col) all(is.na(col)))
+augmented_50_numeric_data_to_impute_filtered <- augmented_50_numeric_data_to_impute[!all_missing_variables]
+augmented_50 <- augmented_50_numeric_dataset[!all_missing_variables]
+
+#Creating new NA map post filtering
+augmented_50_data_filtered_na_positions <- is.na(augmented_50_numeric_data_to_impute_filtered)
+
+#Scaling the dataframe pre-imputation, to undo this step for comparison later you must times your value by the standard deviation of the varibale you want to compare and add the mean
+augmented_50_numeric_data_to_impute_scaled <- scale(augmented_50_numeric_data_to_impute_filtered, center = TRUE, scale = TRUE)
+augmented_50_numeric_data_to_impute_scaled <- as.data.frame(augmented_50_numeric_data_to_impute_scaled)
+
+#Creating a ground-truth dataframe for later comparison
+augmented_50_numeric_data_filtered <- augmented_50_numeric_dataset[!all_missing_variables]
+augmented_50_numeric_data_scaled <- scale(augmented_50_numeric_data_filtered, center = TRUE, scale = TRUE)
+
+#Imputing using KNN
+augmented_50_data_KNN <- kNN(augmented_50_numeric_data_to_impute_scaled, k = 5)
+augmented_50_data_KNN <- augmented_50_data_KNN %>%
+  select_if(is.numeric)
+
+#Imputing using random forest 
+augmented_50_data_randomforest <- missForest(augmented_50_numeric_data_to_impute_scaled,
+                                          maxiter = 10, ntree = 100,
+                                          verbose = TRUE, 
+                                          variablewise = FALSE)
+augmented_50_data_randomforest$OOBerror
+augmented_50_data_randomforest <- as.data.frame(augmented_50_data_randomforest [["ximp"]], row.names = NULL)
+
+#Imputing using the mean 
+augmented_50_data_mean_imputed <- augmented_50_numeric_data_to_impute_scaled %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), mean (., na.rm = TRUE),.)))
+
+#Imputing using the median
+augmented_50_data_median_imputed <- augmented_50_numeric_data_to_impute_scaled %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), median (., na.rm = TRUE),.)))
+
+#Imputing using multiple chained equations with predictive mean matching 
+augmented_50_data_predictive_mean_matching <- mice(augmented_50_numeric_data_to_impute_scaled, method = "pmm", m=5, maxit = 10, seed = 1)
+augmented_50_data_predictive_mean_matching <- complete(augmented_50_data_predictive_mean_matching, action = 1)
+
+#Imputing using multiple chained equations and random forest 
+augmented_50_data_mice_randomforest <- mice(augmented_50_numeric_data_to_impute_scaled, method = "rf", m=5, maxit = 10, seed = 1)
+augmented_50_data_mice_randomforest <- complete(augmented_50_data_mice_randomforest, action = 1)
+
+#Imputing using multiple chained equations and logistic regression 
+augmented_50_data_mice_logreg <- mice(augmented_50_numeric_data_to_impute_scaled, method = "norm", m=5, maxit = 10, seed = 1)
+augmented_50_data_mice_logreg <- complete(augmented_50_data_mice_logreg, action = 1)
+
+#Moving on to generating MSE, RMSE, MAE, and bias metrics by first specifying a list of all the imputed datasets that have just been created 
+augmented_50_imputed_datasets <- list(
+  KNN_augmented = augmented_50_data_KNN, 
+  Mean_augemented = augmented_50_data_mean_imputed,
+  Median_augemented = augmented_50_data_median_imputed, 
+  Mice_Predictive_mean_matching_augmented_50 = augmented_50_data_predictive_mean_matching, 
+  RandomForest_augmented_50 = augmented_50_data_randomforest,
+  Mice_randomforest_augmented_50 = augmented_50_data_mice_randomforest, 
+  Mice_logreg_augmented_50 = augmented_50_data_mice_logreg)
+
+augmented_50_bootstrap_results <- data_frame()
+
+for (method_name in names(augmented_50_imputed_datasets)) {
+  imputed_data <- augmented_50_imputed_datasets[[method_name]]
+  
+  true_vals <- augmented_50_numeric_data_scaled[augmented_50_data_filtered_na_positions]
+  imp_vals <- imputed_data[augmented_50_data_filtered_na_positions]
+  mse  <- mean((true_vals - imp_vals)^2)
+  rmse <- sqrt(mse)
+  mae <- mean(abs(imp_vals - true_vals), na.rm = TRUE)
+  rb <- mean(imp_vals - true_vals)
+  pb <- mean((as.matrix(imp_vals) - (as.matrix(true_vals)))[true_vals != 0] / true_vals[true_vals != 0])
+  mb <- median(imp_vals - true_vals, na.rm = TRUE)
+  
+  augmented_50_bootstrap_results <- rbind(augmented_50_bootstrap_results, data.frame(
+                                     iteration = i,
+                                     method = method_name, 
+                                     MSE = mse, 
+                                     RMSE = rmse,
+                                     MAE = mae,
+                                     Raw_bias = rb,
+                                     Percentage_bias = pb, 
+                                     Median_bias = mb)
+  )
+}
+augmented_50_bootstrap_results
+                                              }
+stopCluster(cl)
+```
+###4.2.2 Collapsing the result of the augmented bootstrap into a single results table
+```{r}
+augmented_50_bootstrap_results <- augmented_50_bootstrap_large_dataframe %>%
+  group_by(method) %>%
+  summarise(
+    mean_MSE = mean(MSE),
+    lower_MSE = quantile(MSE, 0.025),
+    upper_MSE = quantile(MSE, 0.975),
+    
+    mean_RMSE = mean(RMSE),
+    lower_RMSE = quantile(RMSE, 0.025),
+    upper_RMSE = quantile(RMSE, 0.975),
+    
+    mean_MAE = mean(MAE),
+    lower_MAE = quantile(MAE, 0.025),
+    upper_MAE = quantile(MAE, 0.975),
+    
+    mean_Raw_bias = mean(Raw_bias),
+    lower_Raw_bias = quantile(Raw_bias, 0.025),
+    upper_Raw_bias = quantile(Raw_bias, 0.975),
+    
+    mean_Percentage_bias = mean(Percentage_bias),
+    lower_Percentage_bias = quantile(Percentage_bias, 0.025),
+    upper_Percentage_bias = quantile(Percentage_bias, 0.975),
+    
+    mean_Median_bias = mean(Median_bias),
+    lower_Median_bias = quantile(Median_bias, 0.025),
+    upper_Median_bias = quantile(Median_bias, 0.975)
+  )
+
+saveRDS(augmented_50_bootstrap_results, "augmented_50_bootstrap_results.rds")
+
+```
+

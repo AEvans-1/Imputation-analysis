@@ -1,4 +1,3 @@
-Abstract Text
 Background: Missing data is a pervasive issue in clinical pathology datasets, introducing bias if not handled
 correctly. This problem is exacerbated in rare cancers with low data availability. Imputation refers to filling in
 missing values, and its use is common, yet there is no consensus on the best method in small datasets. As

@@ -66,18 +66,6 @@ clean_numeric_data_scaled <- as.data.frame(clean_numeric_data_scaled)
 ###1.2.2 Adding guassian noise to create augmented training datasets with no NAs for imputation models to then be tested against 
 ```{r}
 set_seed = 00
-noise_level <- 0.5
-num_new_variables <- 100
-
-noise_up_mirror_data <- clean_numeric_data %>%
-  slice_sample(n = num_new_variables, replace = TRUE) %>%
-  mutate(across(everything(),
-                ~ pmax(0,
-                . + rnorm(n = num_new_variables, mean = 0, sd = noise_level * sd(., na.rm = TRUE)))))
-
-augmented_100_numeric_dataset <- noise_up_mirror_data
-augmented_100_numeric_data_scaled <- scale(augmented_numeric_dataset, center = TRUE, scale = TRUE)
-augmented_100_numeric_data_caled <- as.data.frame(augmented_numeric_data_scaled)
 
 noise_level <- 0.5
 num_new_variables <- 50
@@ -90,6 +78,20 @@ noise_up_mirror_data <- clean_numeric_data %>%
 augmented_50_numeric_dataset <- noise_up_mirror_data
 augmented_50_numeric_data_scaled <- scale(augmented_numeric_dataset, center = TRUE, scale = TRUE)
 augmented_50_numeric_data_caled <- as.data.frame(augmented_numeric_data_scaled)
+noise_level <- 0.5
+num_new_variables <- 100
+
+
+noise_up_mirror_data <- clean_numeric_data %>%
+  slice_sample(n = num_new_variables, replace = TRUE) %>%
+  mutate(across(everything(),
+                ~ pmax(0,
+                . + rnorm(n = num_new_variables, mean = 0, sd = noise_level * sd(., na.rm = TRUE)))))
+
+augmented_100_numeric_dataset <- noise_up_mirror_data
+augmented_100_numeric_data_scaled <- scale(augmented_numeric_dataset, center = TRUE, scale = TRUE)
+augmented_100_numeric_data_caled <- as.data.frame(augmented_numeric_data_scaled)
+
 
 noise_level <- 0.5
 num_new_variables <- 200
@@ -110,7 +112,7 @@ augmented_numeric_dataset %>%
   ggplot(mapping = aes(x=Patient.no..., y=HCG.at.diagnosis..IU.L.)) + geom_point() + geom_jitter(width = 0.01, height = 0.01) + geom_smooth()
 
 clean_numeric_data %>%
-  ggplot(mapping = aes(x=Patient.no..., y=HCG.at.diagnosis..IU.L.)) + geom_point() + geom_smooth()
+  ggplot(mapping = aes(x=Age.at.diagnosis, y=Antecedent.pregnancy.interval..months.)) + geom_point() + geom_smooth(method = glm)
 
 numeric_data_KNN %>%
   ggplot(mapping = aes(x=Patient.no..., y=HCG.at.diagnosis..IU.L.)) + geom_point() + geom_smooth()

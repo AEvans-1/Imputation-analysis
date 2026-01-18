@@ -1,3 +1,5 @@
+**ABSTRACT:**
+
 Background: Missing data is a pervasive issue in clinical pathology datasets, introducing bias if not handled
 correctly. This problem is exacerbated in rare cancers with low data availability. Imputation refers to filling in
 missing values, and its use is common, yet there is no consensus on the best method in small datasets. As
@@ -18,3 +20,30 @@ used to impute the original dataset.
 Conclusions: RF-SI is the most accurate method of imputation for very small clinical datasets, with KNN more
 effective as size increases. MI performed poorly with low patient numbers but improved as datasets trended
 larger. Both KNN and RF-SI can support regression modelling in rare disease research.
+
+
+
+**SUPPLEMENTARY METHODS:** 
+
+When dealing with model generation and dataset analysis it is importnat to consider the relationship between variables prior to analysis. Therefore the following plot was created to visualise correlations between variables in the entire dataset.
+<img width="3000" height="3000" alt="dataset_wide_correlation_plot" src="https://github.com/user-attachments/assets/d83fed9c-10ec-47d7-aba6-102847401927" />
+
+
+The structure of missing data can have a large impact on imputation quality and reliability, especailly when dealing with such small sample sizes. Therefore the structure of missing data across all permuatations of dataset used in the present study are included bellow as well as a correlation matrix to exmain variable co-linearity. 
+**Original dataset missing structure:**
+<img width="1800" height="1200" alt="original_data_missing_distribution" src="https://github.com/user-attachments/assets/73ee2a3c-50e7-485a-bbb6-47560e373202" />
+This graph shows the structure of missingess in the original dataset prior to cleaning 
+
+**Cleaned/augmented dataset missingness structures**
+a)
+<img width="1800" height="1200" alt="original_data_missing_distribution" src="https://github.com/user-attachments/assets/b1bdf7ec-1bb3-490c-a6bf-b019adc06661" />
+b)
+<img width="1800" height="1200" alt="augmented_50_to_impute_data_missing_distribution" src="https://github.com/user-attachments/assets/19afa2d5-afe6-4e38-8f52-c4cc83f8ac79" />
+c)
+<img width="1800" height="1200" alt="augmented_100_to_impute_data_missing_distribution" src="https://github.com/user-attachments/assets/216292fb-a493-4c12-bfb5-17ace54e3a93" />
+d)
+<img width="1800" height="1200" alt="augmented_200_to_impute_data_missing_distribution" src="https://github.com/user-attachments/assets/8e309a98-6ea1-471c-b277-a6d664a4e9fb" />
+
+
+
+These graphs show the structure of missingness in the cleaned original dataset (a) as well as the agumented datasets with 50 (b), 100 (c), and 200 (d) "patients" respectively. These are a representation of what the simulated missingness added to datasets for imputation evaluation in the evaluation loop looks like. As the missingess in the evalueation loop is random every time these simply serve to illustrate the difference between synthetic missingness that imputaiton was evaluated on compared to the naturally occureing missingess of the original dataset 
